@@ -335,7 +335,6 @@ function save_course_meta($post_id)
     if (!current_user_can('edit_post', $post_id))
         return;
 
-    // Сохраняем расписание
     if (isset($_POST['schedule']) && is_array($_POST['schedule'])) {
         $clean_schedule = [];
 
@@ -355,7 +354,6 @@ function save_course_meta($post_id)
         update_post_meta($post_id, '_course_schedule_structured', $clean_schedule);
     }
 
-    // Сохраняем преподавателя
     $teacher_id = isset($_POST['course_teacher']) ? intval($_POST['course_teacher']) : 0;
     update_post_meta($post_id, '_course_teacher', $teacher_id);
 
@@ -367,7 +365,6 @@ function save_course_meta($post_id)
 }
 add_action('save_post', 'save_course_meta');
 
-// Уведомление в админке
 function course_admin_notice()
 {
     if (isset($_GET['course_meta_warning'])) {
@@ -377,74 +374,90 @@ function course_admin_notice()
 add_action('admin_notices', 'course_admin_notice');
 
 
-add_action('wp_ajax_signup_for_lesson', 'signup_for_lesson');
-add_action('wp_ajax_nopriv_signup_for_lesson', 'signup_for_lesson');
-function signup_for_lesson()
-{
-    check_ajax_referer('my_ajax_nonce', 'nonce');
+add_action('wp_ajax_signup_for_lesson', 'signup_for_lesson_callback');
+add_action('wp_ajax_unsubscribe_from_lesson', 'unsubscribe_from_lesson_callback');
 
-    $course_id = absint($_POST['course_id']);
-    $day = absint($_POST['day']);
-    $slot = absint($_POST['slot']);
+function signup_for_lesson_callback()
+{
+    if (!is_user_logged_in()) {
+        wp_send_json_error('Для записи нужно войти в систему');
+    }
+    check_ajax_referer('signup_nonce', 'nonce');
+
+    $course_id = absint($_POST['course_id'] ?? 0);
+    $day = absint($_POST['day'] ?? -1);
+    $lesson_number = absint($_POST['lesson_number'] ?? -1);
     $user_id = get_current_user_id();
 
     if (!$user_id) {
-        wp_send_json_error(['message' => 'Вы должны войти в систему.']);
+        wp_send_json_error('Вы должны войти в систему');
+    }
+    if (!$course_id || $day < 0 || $lesson_number < 0) {
+        wp_send_json_error('Неверные параметры');
     }
 
-    $registrations = get_post_meta($course_id, '_course_registrations', true);
-    if (!is_array($registrations)) {
-        $registrations = [];
+    $signups = get_post_meta($course_id, '_course_signups', true);
+    if (!is_array($signups)) {
+        $signups = [];
     }
 
-    // Проверка, занят ли слот
-    if (isset($registrations[$day][$slot]) && !empty($registrations[$day][$slot])) {
-        wp_send_json_error(['message' => 'Это занятие уже занято.']);
+    if (!isset($signups[$day][$lesson_number]) || !is_array($signups[$day][$lesson_number])) {
+        $signups[$day][$lesson_number] = [];
     }
 
-    $registrations[$day][$slot] = $user_id;
+    if (in_array($user_id, $signups[$day][$lesson_number], true)) {
+        wp_send_json_error('Вы уже записаны на это занятие');
+    }
 
-    update_post_meta($course_id, '_course_registrations', $registrations);
+    $signups[$day][$lesson_number][] = $user_id;
 
-    wp_send_json_success();
+    update_post_meta($course_id, '_course_signups', $signups);
+
+    wp_send_json_success('Вы успешно записались на занятие');
 }
 
-add_action('wp_ajax_unsubscribe_from_lesson', 'ajax_signout_from_lesson');
 
-function ajax_signout_from_lesson()
+function unsubscribe_from_lesson_callback()
 {
-    if (!is_user_logged_in()) {
-        wp_send_json_error('Требуется вход');
-    }
+    check_ajax_referer('signup_nonce', 'nonce');
 
+    $course_id = absint($_POST['course_id'] ?? 0);
+    $day = absint($_POST['day'] ?? -1);
+    $lesson_number = absint($_POST['lesson_number'] ?? -1);
     $user_id = get_current_user_id();
-    $course_id = intval($_POST['course_id'] ?? 0);
-    $day = intval($_POST['day'] ?? -1);
-    $lesson_number = intval($_POST['lesson_number'] ?? -1);
 
-    $signups = get_post_meta($course_id, '_course_signups', true) ?: [];
-
-    if (isset($signups[$day][$lesson_number])) {
-        $signups[$day][$lesson_number] = array_values(array_diff($signups[$day][$lesson_number], [$user_id]));
-        update_post_meta($course_id, '_course_signups', $signups);
-        wp_send_json_success();
+    if (!$user_id) {
+        wp_send_json_error('Требуется авторизация');
+    }
+    if (!$course_id || $day < 0 || $lesson_number < 0) {
+        wp_send_json_error('Неверные параметры');
     }
 
-    wp_send_json_error('Невозможно отписаться');
+    $signups = get_post_meta($course_id, '_course_signups', true);
+    if (!is_array($signups) || !isset($signups[$day][$lesson_number])) {
+        wp_send_json_error('Нет записей');
+    }
+
+    $index = array_search($user_id, $signups[$day][$lesson_number], true);
+    if ($index !== false) {
+        unset($signups[$day][$lesson_number][$index]);
+        $signups[$day][$lesson_number] = array_values($signups[$day][$lesson_number]);
+        update_post_meta($course_id, '_course_signups', $signups);
+        wp_send_json_success('Вы успешно отписались от занятия');
+    } else {
+        wp_send_json_error('Вы не были записаны на это занятие');
+    }
 }
 
-function theme_enqueue_scripts() {
-    wp_enqueue_script(
-        'ajax-script',
-        get_template_directory_uri() . '/js/ajax.js',
-        array(), // зависимости, например ['jquery'] если нужно
-        null,
-        true // загрузить в footer
-    );
 
-    // Локализация для передачи admin-ajax.php URL в JS
-    wp_localize_script('ajax-script', 'ajax_object', [
+function theme_enqueue_scripts()
+{
+    wp_enqueue_script('ajax-js', get_template_directory_uri() . '/js/ajax.js', [], null, true);
+    wp_localize_script('ajax-js', 'ajax_object', [
         'ajax_url' => admin_url('admin-ajax.php'),
+        'nonce' => wp_create_nonce('signup_nonce'),
+        'is_logged_in' => is_user_logged_in(),
     ]);
+
 }
 add_action('wp_enqueue_scripts', 'theme_enqueue_scripts');
